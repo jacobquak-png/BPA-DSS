@@ -1,4 +1,4 @@
-﻿"""
+"""
 BPA Jaarlijks Beheer Tool – Streamlit UI
 =========================================
 Start met:
@@ -2432,12 +2432,13 @@ with tab_classificatie:
     if _apply_cls and "cls_payload" in st.session_state:
         try:
             schrijf_selectie_json(st.session_state.cls_payload, SELECTIE_PATH)
+            invalidate_caches()
             st.session_state.pop("overzicht_df", None)
-            st.success(
-                f"✅ Selectie opgeslagen in {SELECTIE_PATH}. "
-                f"Open tab 📊 Overzicht — de basisvoorraden worden opnieuw berekend "
-                f"met **{st.session_state.cls_payload['n_items']}** componenten als whitelist."
+            st.toast(
+                f"Selectie opgeslagen ({st.session_state.cls_payload['n_items']} componenten als whitelist).",
+                icon="✅",
             )
+            st.rerun()
         except Exception as e:
             st.error(f"Kon bpa_selectie.json niet schrijven: {e}")
 
@@ -2447,6 +2448,7 @@ with tab_classificatie:
         if st.button("🗑️ Verwijder huidige classificatie-selectie (BPA gebruikt weer alle Excel-codes)"):
             try:
                 os.remove(SELECTIE_PATH)
+                invalidate_caches()
                 st.session_state.pop("overzicht_df", None)
                 st.toast("Selectie verwijderd — BPA gebruikt weer de standaard Excel-filters.", icon="🗑️")
                 st.rerun()
