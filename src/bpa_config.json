@@ -1,0 +1,24 @@
+{
+  "aangemaakt": "2026-05-08",
+  "aangepast": "2026-05-13",
+  "standaard_n_klanten": 3,
+  "n_klanten_overrides": {
+    "MOTSBERVRDM3913#A": 90,
+    "REDUPLAN-00000008": 3
+  },
+  "handmatige_componenten": {
+    "mooi": {
+      "descr": "motortje",
+      "lambda_per_jaar": 7.0,
+      "lt_dagen": 20,
+      "n_klanten": 40,
+      "ip": 600.0
+    }
+  },
+  "uitgesloten_componenten": [],
+  "ip_overrides": {},
+  "lt_overrides": {
+    "MOTSBERVRDM3913#A": 1,
+    "REDUPLAN-00000008": 20
+  }
+}
