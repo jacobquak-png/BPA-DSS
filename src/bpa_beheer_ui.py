@@ -26,27 +26,12 @@ from bpa_beheer import (
     bouw_model_kosten,
     laad_excel_onderdelen,
     laad_classificatie_selectie,
-    regionale_adoptie_parameter,
-    adoptie_kans,
-    aantal_klanten_per_component,
-    binomiale_verdeling,
-    binomiale_quantile,
-    verwacht_subscripties_per_component,
-    gevoeligheid_verwachte_z,
-    pareto_alpha_X,
-    optimale_alpha_bij_X,
-    beta_r_winstband,
-    greedy_alpha_sweep,
-    winst_voor_wtp_grid,
-    metrieken_voor_wtp_grid,
-    greedy_detail_for_params,
     SERVICE_LEVELS,
     CONFIG_PATH,
     HISTORY_PATH,
     SCRIPT_DIR,
     SELECTIE_PATH,
     EXCEL_PATH,
-    SUBSCRIPTIES_PATH,
 )
 from classificatie import (
     ClassificatieParams,
@@ -117,12 +102,6 @@ def _cached_bereken_overzicht(cfg_json: str, _excel_mtime: float, _selectie_mtim
     return bereken_overzicht(json.loads(cfg_json))
 
 
-@st.cache_data(show_spinner=False, max_entries=4)
-def _cached_aantal_klanten(_excel_mtime: float, upload=None) -> pd.Series:
-    """Cached M_i per component. upload = bestandspad (str) of UploadedFile."""
-    return aantal_klanten_per_component(upload)
-
-
 def get_classificatie_info() -> dict:
     """Lees bpa_selectie.json (cached). Auto-invalideert bij file-update."""
     return _cached_laad_classificatie_selectie(_file_mtime(SELECTIE_PATH))
@@ -143,7 +122,6 @@ def invalidate_caches() -> None:
     _cached_bereken_overzicht.clear()
     _cached_laad_classificatie_selectie.clear()
     _cached_laad_ruwe_dataset.clear()
-    _cached_aantal_klanten.clear()
 
 
 @st.cache_data(show_spinner="Gewichten-sweep berekenen…", max_entries=8)
@@ -278,14 +256,39 @@ with tab_overzicht:
             f"Draai `classificatie_scoring.py` om de koppeling te activeren."
         )
 
-    if st.button("🔄 Herbereken (laadt Excel opnieuw)"):
-        invalidate_caches()
-        with st.spinner("Berekenen…"):
-            df = get_overzicht_df(cfg)
-        if df.empty:
-            st.warning("Geen onderdelen gevonden.")
-        else:
-            st.session_state.overzicht_df = df
+    _col_herb, _col_n1, _col_n_reset = st.columns(3)
+    with _col_herb:
+        if st.button("🔄 Herbereken (laadt Excel opnieuw)"):
+            invalidate_caches()
+            with st.spinner("Berekenen…"):
+                df = get_overzicht_df(cfg)
+            if df.empty:
+                st.warning("Geen onderdelen gevonden.")
+            else:
+                st.session_state.overzicht_df = df
+                st.rerun()
+    with _col_n1:
+        if st.button("👥 Stel Z_i = 1 in voor alle componenten"):
+            _codes = (
+                st.session_state.overzicht_df.index.astype(str).tolist()
+                if "overzicht_df" in st.session_state and not st.session_state.overzicht_df.empty
+                else []
+            )
+            cfg.setdefault("n_klanten_overrides", {})
+            for _c in _codes:
+                cfg["n_klanten_overrides"][_c] = 1
+            sla_config_op(cfg)
+            invalidate_caches()
+            st.session_state.pop("overzicht_df", None)
+            st.toast(f"Z_i voor {len(_codes)} componenten op 1 gezet.", icon="👥")
+            st.rerun()
+    with _col_n_reset:
+        if st.button("↩️ Herstel Z_i (Excel-waarden)"):
+            cfg["n_klanten_overrides"] = {}
+            sla_config_op(cfg)
+            invalidate_caches()
+            st.session_state.pop("overzicht_df", None)
+            st.toast("Z_i-overrides verwijderd — Excel-waarden worden weer gebruikt.", icon="↩️")
             st.rerun()
 
     if "overzicht_df" in st.session_state:
@@ -484,11 +487,9 @@ with tab_overzicht:
 with tab_subscripties:
     st.subheader("Subscripties per component")
     st.info(
-        "Het aantal subscripties (Z) per component komt automatisch uit het "
-        "werkelijke aantal klantlocaties; varieer prijs α en service level β^tar in "
-        "de tabs Verwachte subscripties / Sensitivity om het verwachte aantal abonnees te zien. "
-        "Een vaste override per component kun je hieronder bij 'IP / Levertijd / "
-        "Z aanpassen' instellen.",
+        "Het aantal subscripties (Z_i) per component komt uit het werkelijke "
+        "aantal klantlocaties. Een vaste override per component kun je hieronder "
+        "bij 'Overrides per artikelcode' instellen.",
         icon="ℹ️",
     )
 
@@ -1033,15 +1034,14 @@ with tab_historie:
             "subscripties per service level. Toont hoeveel kapitaal BPA in voorraad "
             "moet investeren naarmate het klantenbestand groeit. De x-as toont het "
             "TOTALE aantal subscripties over alle componenten en start bij de som van "
-            "de verwachte sub-aantallen (E[Z]); alle componenten schalen van daaruit "
+            "de huidige geconfigureerde Z_i-waarden; alle componenten schalen van daaruit "
             "proportioneel mee omhoog."
         )
 
-        # Baseline per component = het geconfigureerde n_klanten, dat de
-        # verwachte E[Z_i(α,X)] weergeeft zodra die via de tab Verwachte
-        # subscripties is doorgezet. De x-as toont het TOTAAL aantal
-        # subscripties over alle componenten (= som van de baselines bij
-        # factor 1.0); alle componenten schalen proportioneel mee.
+        # Baseline per component = het geconfigureerde n_klanten (Z_i).
+        # De x-as toont het TOTAAL aantal subscripties over alle componenten
+        # (= som van de baselines bij factor 1.0); alle componenten schalen
+        # proportioneel mee.
         _sim_base_inv = {}
         # Groeifactoren: 20 punten van 1.0x (huidig totaal) tot 2.9x in stappen van 0.1.
         _INV_FACTORS = [round(1.0 + 0.1 * _k, 1) for _k in range(20)]
@@ -1344,49 +1344,11 @@ with tab_kosten:
                 format_func=lambda v: f"{v:.1%}",
             )
 
-        _kost_ad1, _kost_ad2 = st.columns(2)
-        with _kost_ad1:
-            k_q_eq = st.number_input(
-                "q_eq (adoptie bij pariteit)",
-                min_value=0.01, max_value=0.99,
-                value=float(st.session_state.get("subsim_q_eq", 0.55)),
-                step=0.05, format="%.2f", key="kost_q_eq",
-                help="Adoptiekans bij kostenpariteit α = κ_c.",
-            )
-        with _kost_ad2:
-            k_beta_r = st.number_input(
-                "η_r (kostenratio-gevoeligheid)",
-                min_value=0.0, max_value=20.0,
-                value=float(st.session_state.get("subsim_beta_r", 1.0)),
-                step=0.1, format="%.2f", key="kost_beta_r",
-                help="Gevoeligheid adoptie voor kostenratio ln(κ_c/α).",
-            )
-
         if st.button("💰 Bereken kosten"):
             with st.spinner("Kostenmodel berekenen…"):
                 try:
-                    # Adoptie-bewuste overzicht: vervang n_klanten/lambda_jr door Z_i(α)
-                    _k_ov = st.session_state.overzicht_df.copy()
-                    try:
-                        _k_excel_src = st.session_state.get("subsim_upload") or (
-                            SUBSCRIPTIES_PATH if os.path.exists(SUBSCRIPTIES_PATH) else None)
-                        if _k_excel_src is not None:
-                            _k_n_mi = _cached_aantal_klanten(
-                                _file_mtime(_k_excel_src if isinstance(_k_excel_src, str) else ""),
-                                upload=_k_excel_src,
-                            )
-                            if not _k_n_mi.empty:
-                                _k_q    = adoptie_kans(k_alpha, k_kappa_c, k_q_eq, k_beta_r)
-                                _k_base = _k_ov.loc[_k_ov.index.isin(_k_n_mi.index)].copy()
-                                _k_ez   = _k_n_mi.reindex(_k_base.index).fillna(0.0) * _k_q
-                                _k_lpc  = (_k_base["lambda_jr"] / _k_base["n_klanten"].replace(0, np.nan)).fillna(0.0)
-                                _k_base["n_klanten"] = _k_ez.round().clip(lower=0).astype(int)
-                                _k_base["lambda_jr"] = (_k_ez * _k_lpc).values
-                                _k_ov = _k_base
-                    except Exception:
-                        pass  # fallback op origineel overzicht
                     _m, _r = bouw_model_kosten(
-                        _k_ov,
+                        st.session_state.overzicht_df,
                         alpha=k_alpha,
                         kappa_bpa=k_kappa_bpa,
                         kappa_c=k_kappa_c,
@@ -1517,52 +1479,6 @@ with tab_drempel:
         )
         _sl_col = f"s@{_sl_d:.1%}"
 
-        # ── Adoptie-bewuste parameters: bereken Z_i(α) als huidig niveau ──
-        _drm_c1, _drm_c2, _drm_c3 = st.columns(3)
-        with _drm_c1:
-            _drm_alpha = st.number_input(
-                "α (abonnementstarief)",
-                min_value=0.001, max_value=1.0,
-                value=float(st.session_state.get("kosten_params", {}).get("alpha", 0.15)),
-                step=0.01, format="%.3f", key="drm_alpha",
-                help="Prijspercentage α waarvoor Z_i(α) = M_i·q(α) wordt berekend.",
-            )
-        with _drm_c2:
-            _drm_q_eq = st.number_input(
-                "q_eq (adoptie bij pariteit)",
-                min_value=0.01, max_value=0.99,
-                value=float(st.session_state.get("subsim_q_eq", 0.55)),
-                step=0.05, format="%.2f", key="drm_q_eq",
-            )
-        with _drm_c3:
-            _drm_beta_r = st.number_input(
-                "η_r (kostenratio-gevoeligheid)",
-                min_value=0.0, max_value=20.0,
-                value=float(st.session_state.get("subsim_beta_r", 1.0)),
-                step=0.1, format="%.2f", key="drm_beta_r",
-            )
-        _drm_kappa_c = float(st.session_state.get("kosten_params", {}).get("kappa_c", 0.25))
-        _drm_q = adoptie_kans(_drm_alpha, _drm_kappa_c, _drm_q_eq, _drm_beta_r)
-
-        # Laad M_i (cached) voor Z_i(α) = M_i·q(α)
-        _drm_n_mi = pd.Series(dtype=float)
-        try:
-            _drm_excel_src = st.session_state.get("subsim_upload") or (
-                SUBSCRIPTIES_PATH if os.path.exists(SUBSCRIPTIES_PATH) else None)
-            if _drm_excel_src is not None:
-                _drm_n_mi = _cached_aantal_klanten(
-                    _file_mtime(_drm_excel_src if isinstance(_drm_excel_src, str) else ""),
-                    upload=_drm_excel_src,
-                )
-        except Exception:
-            pass
-        if not _drm_n_mi.empty:
-            st.caption(
-                f"Adoptie-bewust: q(α={_drm_alpha:.1%}) = {_drm_q:.3f} — "
-                f"Z_i(α) = M_i·q gebruikt als huidig niveau. "
-                f"Drempel = extra abonnees boven Z_i(α) nodig voor S*+1."
-            )
-
         _MAX_N_SEARCH = 100_000
         _drempel_rows = []
 
@@ -1572,13 +1488,11 @@ with tab_drempel:
             _lam_orig = float(_row["lambda_jr"])
             _lt_jr    = float(_row["LT_dagen"]) / 365
 
-            # Adoptie-bewust: gebruik Z_i(α) = M_i·q(α) als huidig abonneeniveau
-            _mi  = float(_drm_n_mi.get(str(_code), float(_n_orig))) if not _drm_n_mi.empty else float(_n_orig)
-            _n   = int(round(_mi * _drm_q))
+            _n = _n_orig
             _lam_pn = _lam_orig / _n_orig if _n_orig > 0 else _lam_orig
-            _lam = _n * _lam_pn
+            _lam = _lam_orig
 
-            # S* op huidig adoptiepunt (Poisson-inverse)
+            # S* op het huidige geconfigureerde Z_i (Poisson-inverse)
             _s_now = (BPAOptimizationModel.inverse_service_level(_sl_d, _lam, _lt_jr)
                       if _n > 0 and _lam > 0 and _lt_jr > 0 else 0)
 
