@@ -208,13 +208,14 @@ if "overzicht_df" not in st.session_state:
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab_overzicht, tab_subscripties, tab_toevoegen, tab_verwijderen, tab_historie, tab_kosten, tab_drempel, tab_classificatie = st.tabs([
+tab_overzicht, tab_subscripties, tab_toevoegen, tab_verwijderen, tab_historie, tab_kosten, tab_budget, tab_drempel, tab_classificatie = st.tabs([
     "📊 Overzicht",
     "✏️ Subscripties aanpassen",
     "➕ Component toevoegen",
     "🗑️ Component verwijderen",
     "📈 Historiek",
     "💰 Kostenanalyse",
+    "💼 Budget-scenario",
     "🔢 Subscriptiedrempel",
     "🏷️ Classificatie",
 ])
@@ -1367,12 +1368,33 @@ with tab_kosten:
             _iv = _r['alpha_intervals']
             _p  = st.session_state.kosten_params
 
+            _det = _m.calculate_detailed_bpa_costs()
+            _per = _iv['per_component']
+            _profitable_codes = [
+                _code for _code in _m.sets['spare_parts']
+                if _r['revenue_by_part'].get(_code, 0) - _det[_code]['total'] > 0
+            ]
+            _kpi_revenue = sum(_r['revenue_by_part'].get(_code, 0)
+                               for _code in _profitable_codes)
+            _kpi_costs = sum(_det[_code]['total'] for _code in _profitable_codes)
+            _kpi_margin = _kpi_revenue - _kpi_costs
+            _kpi_feasible = bool(_profitable_codes) and all(
+                _per.get(_code, {}).get('alpha_U') is not None
+                and _p['alpha'] <= _per[_code]['alpha_U']
+                for _code in _profitable_codes
+            )
+
             # ── Samenvatting ───────────────────────────────────────────────
             _c1, _c2, _c3, _c4 = st.columns(4)
-            _c1.metric("Haalbaar",    "✓ JA"  if _r['feasible'] else "✗ NEE")
-            _c2.metric("Totale omzet",  f"€ {_r['total_revenue']:,.0f}")
-            _c3.metric("BPA kosten",    f"€ {_r['bpa_costs']:,.0f}")
-            _c4.metric("Marge",         f"€ {_r['bpa_margin']:+,.0f}")
+            _c1.metric("Haalbaar", "✓ JA" if _kpi_feasible else "✗ NEE",
+                       help="Berekend over uitsluitend winstgevende onderdelen.")
+            _c2.metric("Totale omzet", f"€ {_kpi_revenue:,.0f}")
+            _c3.metric("BPA kosten", f"€ {_kpi_costs:,.0f}")
+            _c4.metric("Marge", f"€ {_kpi_margin:+,.0f}")
+            st.caption(
+                f"KPI's bevatten alleen de **{len(_profitable_codes)} winstgevende** "
+                f"onderdelen van {len(_m.sets['spare_parts'])} totaal."
+            )
 
             _al = _iv['universal_alpha_L']
             _au = _iv['universal_alpha_U']
@@ -1384,9 +1406,7 @@ with tab_kosten:
 
             # ── Per-component kosten tabel ─────────────────────────────────
             st.subheader("Kosten per component")
-            _det = _m.calculate_detailed_bpa_costs()
             _bsl = _m.calculate_base_stock_levels()
-            _per = _iv['per_component']
             _lt  = _m.parameters['lead_time']
 
             _rows = []
@@ -1426,10 +1446,11 @@ with tab_kosten:
                 height=420,
             )
             st.write(
-                f"**Totaal:** S\\* = {int(_tbl['S*'].sum())}  |  "
-                f"C\\_BPA = € {_tbl['C_BPA (€)'].sum():,.2f}  |  "
-                f"Omzet = € {_tbl['Omzet (€)'].sum():,.2f}  |  "
-                f"Marge = € {_tbl['Marge (€)'].sum():+,.2f}"
+                f"**Totaal winstgevende onderdelen:** "
+                f"S\\* = {int(_tbl.loc[_profitable_codes, 'S*'].sum())}  |  "
+                f"C\\_BPA = € {_kpi_costs:,.2f}  |  "
+                f"Omzet = € {_kpi_revenue:,.2f}  |  "
+                f"Marge = € {_kpi_margin:+,.2f}"
             )
 
             # ── Klantbesparingen ───────────────────────────────────────────
@@ -1452,6 +1473,289 @@ with tab_kosten:
                     }),
                     use_container_width=True,
                 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TAB 7 – BUDGET-SCENARIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab_budget:
+    st.subheader("Budget-scenario — greedy selectie")
+    st.caption(
+        "Selecteer binnen een maximaal investeringsbudget de winstgevende onderdelen "
+        "met de hoogste waarde per geïnvesteerde euro. Investering = S* × IP en "
+        "jaarwinst = Z × α × VP − κ_BPA × IP × S*."
+    )
+
+    _ov_budget = st.session_state.get("overzicht_df")
+    if _ov_budget is None or _ov_budget.empty:
+        st.warning("Laad eerst het overzicht via het tabblad 📊 Overzicht.")
+    else:
+        _ov_budget = _ov_budget.copy()
+        _sl_cols_budget = [c for c in _ov_budget.columns if c.startswith("s@")]
+
+        if not _sl_cols_budget:
+            st.error("Geen service-levelkolommen gevonden in het overzicht.")
+        else:
+            _kp_budget = st.session_state.get("kosten_params", {})
+            _bc1, _bc2, _bc3 = st.columns(3)
+            with _bc1:
+                _sl_budget = st.selectbox(
+                    "Service level voor S*",
+                    options=_sl_cols_budget,
+                    index=len(_sl_cols_budget) // 2,
+                    key="budget_sl",
+                )
+
+            _full_investment = float(
+                (_ov_budget[_sl_budget] * _ov_budget["IP"]).sum()
+            )
+            with _bc2:
+                _max_budget = st.number_input(
+                    "Maximaal budget (€)",
+                    min_value=0.0,
+                    max_value=max(_full_investment * 1.2, 1_000_000.0),
+                    value=float(round(_full_investment * 0.5, 0)),
+                    step=1000.0,
+                    key="budget_max",
+                )
+            with _bc3:
+                _criterion_budget = st.selectbox(
+                    "Waardecriterium",
+                    options=[
+                        "Winst / investering (ROI)",
+                        "Classificatie-score",
+                        "λ × LT × VP (uitval-impact)",
+                        "VP (verkoopprijs)",
+                    ],
+                    key="budget_criterion",
+                )
+
+            _bp1, _bp2 = st.columns(2)
+            with _bp1:
+                _alpha_budget = st.number_input(
+                    "α (abonnementstarief, %)",
+                    min_value=0.1,
+                    max_value=50.0,
+                    value=float(_kp_budget.get("alpha", 0.15)) * 100,
+                    step=0.5,
+                    format="%.1f",
+                    key="budget_alpha",
+                ) / 100
+            with _bp2:
+                _kappa_budget = st.number_input(
+                    "κ_BPA (carrying rate, %)",
+                    min_value=0.1,
+                    max_value=100.0,
+                    value=float(_kp_budget.get("kappa_bpa", 0.20)) * 100,
+                    step=0.5,
+                    format="%.1f",
+                    key="budget_kappa",
+                ) / 100
+
+            _df_budget = _ov_budget.copy()
+            _df_budget["S_star"] = pd.to_numeric(
+                _df_budget[_sl_budget], errors="coerce"
+            ).fillna(0.0)
+            _df_budget["Investering"] = _df_budget["S_star"] * _df_budget["IP"]
+            _df_budget["Omzet_jr"] = (
+                _df_budget["n_klanten"] * _alpha_budget * _df_budget["VP"]
+            )
+            _df_budget["C_BPA"] = (
+                _kappa_budget * _df_budget["IP"] * _df_budget["S_star"]
+            )
+            _df_budget["Winst_jr"] = (
+                _df_budget["Omzet_jr"] - _df_budget["C_BPA"]
+            )
+
+            if _criterion_budget == "Winst / investering (ROI)":
+                _df_budget["Waarde"] = _df_budget["Winst_jr"]
+            elif _criterion_budget == "Classificatie-score":
+                _score_budget = pd.to_numeric(
+                    _df_budget.get("Cls_score"), errors="coerce"
+                )
+                _fallback_budget = (
+                    _df_budget["lambda_jr"]
+                    * (_df_budget["LT_dagen"] / 365)
+                    * _df_budget["VP"]
+                )
+                _df_budget["Waarde"] = _score_budget.fillna(_fallback_budget)
+            elif _criterion_budget == "λ × LT × VP (uitval-impact)":
+                _df_budget["Waarde"] = (
+                    _df_budget["lambda_jr"]
+                    * (_df_budget["LT_dagen"] / 365)
+                    * _df_budget["VP"]
+                )
+            else:
+                _df_budget["Waarde"] = _df_budget["VP"]
+
+            _df_budget["Waarde_per_euro"] = np.where(
+                _df_budget["Investering"] > 0,
+                _df_budget["Waarde"] / _df_budget["Investering"],
+                np.inf,
+            )
+            _df_budget = (
+                _df_budget
+                .assign(_ratio_sort=lambda d: d["Waarde_per_euro"].round(3))
+                .sort_values(
+                    ["_ratio_sort", "Investering"],
+                    ascending=[False, True],
+                    kind="mergesort",
+                )
+                .drop(columns="_ratio_sort")
+            )
+
+            _eligible_budget = (
+                np.isfinite(_df_budget["Winst_jr"])
+                & (_df_budget["Winst_jr"] > 0)
+            )
+            _selected_budget = np.zeros(len(_df_budget), dtype=bool)
+            _remaining_budget = float(_max_budget)
+            for _position in np.where(_eligible_budget.to_numpy())[0]:
+                _item_investment = float(
+                    _df_budget["Investering"].iloc[_position]
+                )
+                if _item_investment <= _remaining_budget:
+                    _selected_budget[_position] = True
+                    _remaining_budget -= _item_investment
+            _df_budget["In_selectie"] = _selected_budget
+            _df_budget["Marge_pct"] = np.where(
+                _df_budget["Omzet_jr"] > 0,
+                _df_budget["Winst_jr"] / _df_budget["Omzet_jr"] * 100,
+                np.nan,
+            )
+            _df_budget["ROI_jr"] = np.where(
+                _df_budget["Investering"] > 0,
+                _df_budget["Winst_jr"] / _df_budget["Investering"] * 100,
+                np.nan,
+            )
+
+            _selected_rows = _df_budget[_df_budget["In_selectie"]]
+            _selected_investment = float(_selected_rows["Investering"].sum())
+            _selected_revenue = float(_selected_rows["Omzet_jr"].sum())
+            _selected_costs = float(_selected_rows["C_BPA"].sum())
+            _selected_profit = float(_selected_rows["Winst_jr"].sum())
+            _portfolio_roi = (
+                _selected_profit / _selected_investment * 100
+                if _selected_investment > 0 else 0.0
+            )
+            _loss_count = int((~_eligible_budget).sum())
+
+            st.caption(
+                f"Volledige voorraadwaarde bij {_sl_budget}: "
+                f"**€ {_full_investment:,.0f}** · budget: **€ {_max_budget:,.0f}** · "
+                f"α = **{_alpha_budget:.1%}** · κ_BPA = **{_kappa_budget:.1%}**"
+            )
+            if _loss_count:
+                st.warning(
+                    f"{_loss_count} onderdelen hebben geen positieve jaarwinst en "
+                    "worden daarom niet geselecteerd."
+                )
+
+            _bm1, _bm2, _bm3, _bm4 = st.columns(4)
+            _bm1.metric(
+                "Geselecteerd",
+                f"{len(_selected_rows)} / {len(_df_budget)}",
+            )
+            _bm2.metric("Investering", f"€ {_selected_investment:,.0f}")
+            _bm3.metric(
+                "Budget-benutting",
+                f"{_selected_investment / _max_budget:.1%}" if _max_budget > 0 else "—",
+            )
+            _bm4.metric("ROI / jaar", f"{_portfolio_roi:+.1f}%")
+
+            _bw1, _bw2, _bw3 = st.columns(3)
+            _bw1.metric("Omzet / jaar", f"€ {_selected_revenue:,.0f}")
+            _bw2.metric("BPA-kosten / jaar", f"€ {_selected_costs:,.0f}")
+            _bw3.metric("Winst / jaar", f"€ {_selected_profit:+,.0f}")
+
+            _table_budget = _df_budget.reset_index().rename(columns={
+                _df_budget.index.name or "index": "Code",
+                "n_klanten": "Z",
+                "S_star": "S*",
+                "Investering": "Inv. (€)",
+                "Omzet_jr": "Omzet/jr (€)",
+                "C_BPA": "C_BPA/jr (€)",
+                "Winst_jr": "Winst/jr (€)",
+                "Marge_pct": "Marge %",
+                "ROI_jr": "ROI/jr %",
+                "In_selectie": "In selectie",
+            })
+            _table_budget["In selectie"] = _table_budget["In selectie"].map(
+                {True: "✓", False: "✗"}
+            )
+            _budget_columns = [
+                "Code", "Descr", "Z", "S*", "IP", "VP", "Omzet/jr (€)",
+                "C_BPA/jr (€)", "Winst/jr (€)", "Marge %", "Inv. (€)",
+                "ROI/jr %", "In selectie",
+            ]
+
+            def _budget_selection_color(value):
+                return (
+                    "background-color: #c8e6c9" if value == "✓"
+                    else "background-color: #ffcdd2"
+                )
+
+            st.subheader("Budgetselectie per onderdeel")
+            st.dataframe(
+                _table_budget[_budget_columns].style.format({
+                    "IP": "€ {:,.2f}",
+                    "VP": "€ {:,.2f}",
+                    "Omzet/jr (€)": "€ {:,.0f}",
+                    "C_BPA/jr (€)": "€ {:,.0f}",
+                    "Winst/jr (€)": "€ {:+,.0f}",
+                    "Marge %": "{:+.1f}%",
+                    "Inv. (€)": "€ {:,.0f}",
+                    "ROI/jr %": "{:+.1f}%",
+                }, na_rep="—").map(
+                    _budget_selection_color, subset=["In selectie"]
+                ),
+                use_container_width=True,
+                height=460,
+                hide_index=True,
+            )
+
+            with st.expander("Cumulatieve waarde versus investering"):
+                import matplotlib.pyplot as _plt_budget
+
+                _eligible_plot = _df_budget[_eligible_budget].copy()
+                _cum_investment = _eligible_plot["Investering"].cumsum()
+                _cum_value = _eligible_plot["Waarde"].cumsum()
+                _fig_budget, _ax_budget = _plt_budget.subplots(figsize=(9, 4.5))
+                _ax_budget.plot(_cum_investment, _cum_value, color="#1976D2", linewidth=2)
+                _ax_budget.axvline(
+                    _max_budget, color="#C62828", linestyle="--",
+                    label=f"Budget € {_max_budget:,.0f}",
+                )
+                _ax_budget.set_xlabel("Cumulative investment (€)")
+                _ax_budget.set_ylabel("Cumulative value")
+                _ax_budget.set_title("Greedy budget selection")
+                _ax_budget.grid(True, alpha=0.3)
+                _ax_budget.legend()
+                _fig_budget.tight_layout()
+                st.pyplot(_fig_budget)
+                _plt_budget.close(_fig_budget)
+
+            if st.button("🚫 Pas budgetselectie toe via uitsluitingen"):
+                _selected_codes = {
+                    str(code) for code in _df_budget.index[_df_budget["In_selectie"]]
+                }
+                _manual_codes = set(cfg.get("handmatige_componenten", {}))
+                _excluded_codes = [
+                    str(code) for code in _df_budget.index
+                    if str(code) not in _selected_codes and str(code) not in _manual_codes
+                ]
+                cfg.setdefault("uitgesloten_componenten", [])
+                for _code in _excluded_codes:
+                    if _code not in cfg["uitgesloten_componenten"]:
+                        cfg["uitgesloten_componenten"].append(_code)
+                sla_config_op(cfg)
+                invalidate_caches()
+                st.session_state.pop("overzicht_df", None)
+                st.toast(
+                    f"Budgetselectie toegepast; {len(_excluded_codes)} onderdelen uitgesloten.",
+                    icon="✅",
+                )
+                st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────────
 #  TAB 8 – SUBSCRIPTIEDREMPEL
