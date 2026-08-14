@@ -227,36 +227,6 @@ tab_overzicht, tab_subscripties, tab_toevoegen, tab_verwijderen, tab_historie, t
 with tab_overzicht:
     st.subheader("Basisvoorraden per component")
 
-    # Excel-bestandsdatum ophalen
-    try:
-        from bpa_beheer import EXCEL_PATH as _EXCEL_PATH
-        _excel_mtime = date.fromtimestamp(os.path.getmtime(_EXCEL_PATH)).isoformat()
-    except Exception:
-        _excel_mtime = "onbekend"
-
-    st.write(
-        f"Configuratie bijgewerkt: **{cfg['aangepast']}** · "
-        f"Excel gewijzigd: **{_excel_mtime}**"
-    )
-
-    # ── Classificatie-koppeling status ────────────────────────────────────
-    _cls_info = get_classificatie_info()
-    if _cls_info:
-        _lt_ov = _cls_info.get('lt_overzicht', {})
-        _n_cls = len(_cls_info.get('items', {}))
-        st.success(
-            f"🔗 Classificatie-koppeling actief — **{_n_cls}** componenten geselecteerd "
-            f"(gegenereerd {_cls_info.get('gegenereerd', '?')}). "
-            f"LT-bron: ✅ geupdate **{_lt_ov.get('geupdate', 0)}**  ·  "
-            f"⚠️ ERP-default **{_lt_ov.get('default', 0)}**  ·  "
-            f"❌ ontbreekt **{_lt_ov.get('ontbreekt', 0)}**"
-        )
-    else:
-        st.info(
-            f"ℹ️  Geen classificatie-selectie gevonden ({SELECTIE_PATH}). "
-            f"Draai `classificatie_scoring.py` om de koppeling te activeren."
-        )
-
     _col_herb, _col_n1, _col_n_reset = st.columns(3)
     with _col_herb:
         if st.button("🔄 Herbereken (laadt Excel opnieuw)"):
